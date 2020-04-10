@@ -142,17 +142,17 @@ class kb_variation:
 
         hu = htmlreportutils(self.callback_url, params['workspace_name'], report_dir)
 
-        hu.create_html_report(report_dir, name_dict)
+        output = hu.create_html_report(report_dir, name_dict)
 
         
-        report = KBaseReport(self.callback_url)
-        report_info = report.create({'report': {'objects_created':[],
-                                                'text_message': "xmx"},
-                                                'workspace_name': params['workspace_name']})
-        output = {
-            'report_name': report_info['name'],
-            'report_ref': report_info['ref'],
-        }
+        ##report = KBaseReport(self.callback_url)
+        #report_info = report.create({'report': {'objects_created':[],
+        #                                        'text_message': "xmx"},
+        #                                        'workspace_name': params['workspace_name']})
+        #output = {
+        #    'report_name': report_info['name'],
+         #   'report_ref': report_info['ref'],
+        #}
         #END run_kb_variation
 
         # At some point might do deeper type checking...
