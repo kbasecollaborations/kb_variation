@@ -115,10 +115,8 @@
                 {
                     "narrative_system_variable": "workspace",
                     "target_property": "workspace_name"
-                },{
-                    "narrative_system_variable": "workspace_id",
-                    "target_property": "workspace_id"
-                },{
+                },
+                {
                     "input_parameter": "genome_or_assembly_ref",
                     "target_property": "genome_or_assembly_ref",
                     "target_type_transform": "resolved-ref"
@@ -146,7 +144,11 @@
                   "input_parameter": "min_qual",
                   "target_property": "min_qual"
                 },
-		{
+                 {
+                  "input_parameter": "variation_object_name",
+                  "target_property": "variation_object_name"
+                },
+		        {
                     "input_parameter": "sample_attribute_ref",
                     "target_property": "sample_attribute_ref",
                     "target_type_transform": "resolved-ref"
