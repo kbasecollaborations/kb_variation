@@ -1,0 +1,120 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use FindBin;
+use lib "$FindBin::RealBin/../perl5";
+###LINE_FOR_BREW_CONDA###
+use Snippy::Version;
+use List::Util qw(max);
+use File::Temp;
+use Fatal;
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Globals
+
+my $VERSION = Snippy::Version->version;
+my $EXE = $FindBin::RealScript;
+my $DIVIDER = '~'x80;
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Options
+
+my(@Options, $debug, $cpus, $auto, $vcf, $ref, $bam, $html);
+setOptions();
+
+if ($auto) {
+  $vcf ||= 'snps.vcf';
+  $ref ||= 'reference/ref.fa';
+  $bam ||= 'snps.bam';
+}
+
+$vcf or die "need --vcf <snps.vcf>";
+$ref or die "need --ref <ref.fa>";
+$bam or die "need --bam <aln.bam>";
+
+my $opt = $html ? '-d H' : '-d T';
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Main
+
+my $cmdfile = File::Temp->new(UNLINK=>1);
+my $count=0;
+
+print STDERR "Parsing: $vcf\n";
+open VCF, '<', $vcf;
+while (<VCF>) {
+  next if m/^#/;
+  chomp;
+
+  # [VCF] CHROM POS ID REF ALT QUAL FILTER INFO FORMAT unknown
+  my($chr,$pos,undef,$refb,$alt,$qual,$filter,$info) = split m/\t/;
+
+  $info =~ m/DP=(\d+)/; my $DP = $1 || '?';
+  $info =~ m/TYPE=(\w+)/; my $TYPE = $1 || '?';
+
+  $count++;
+  my $desc = "$chr:$pos $TYPE $refb=>$alt DP=$DP Q=$qual [$count]";
+  my $begin = max(1, $pos-40); # put our SNP in the centre of the screen
+
+  my $echo = "\\n$DIVIDER\\n>$desc\\n";
+  $echo = "<PRE>".$echo."</PRE>\\n" if $html;
+
+  my $cmd = "echo -e '$echo' && samtools tview -p '$chr:$begin' $opt $bam $ref";
+  print $cmdfile $cmd,"\n";
+}
+
+my $cmd = "parallel -j $cpus -k -a ".$cmdfile->filename;
+print STDERR "Running: $cmd\n";
+system($cmd)==0 or die "Could not run: $cmd";
+
+#----------------------------------------------------------------------
+sub show_version {
+  print "$EXE $VERSION\n";
+  exit(0);
+}
+
+#----------------------------------------------------------------------
+# Option setting routines
+
+sub setOptions {
+  use Getopt::Long;
+
+  @Options = (
+    {OPT=>"help!",     VAR=>\&usage,                DESC=>"This help"},
+    {OPT=>"version!",  VAR=>\&show_version,         DESC=>"Print version and exit"},
+    {OPT=>"debug!",    VAR=>\$debug,   DEFAULT=>0,  DESC=>"Output verbose debug info"},
+    {OPT=>"auto!",     VAR=>\$auto,    DEFAULT=>0,  DESC=>"Autoset --vcf/bam/ref to snippy names"},
+    {OPT=>"cpus=i",    VAR=>\$cpus,    DEFAULT=>1,  DESC=>"Number of parallel threads to use"},
+    {OPT=>"vcf=s",     VAR=>\$vcf,     DEFAULT=>'', DESC=>"VCF input file (raw)"},
+    {OPT=>"bam=s",     VAR=>\$bam,     DEFAULT=>'', DESC=>"BAM alignments (indexed)"},
+    {OPT=>"ref=s",     VAR=>\$ref,     DEFAULT=>'', DESC=>"FASTA reference (indexed)"},
+    {OPT=>"html!",     VAR=>\$html,    DEFAULT=>0 , DESC=>"Write a HTML report instead of TXT"},
+  );
+
+  (!@ARGV) && (usage());
+
+  &GetOptions(map {$_->{OPT}, $_->{VAR}} @Options) || usage();
+
+  # Now setup default values.
+  foreach (@Options) {
+    if (defined($_->{DEFAULT}) && !defined(${$_->{VAR}})) {
+      ${$_->{VAR}} = $_->{DEFAULT};
+    }
+  }
+}
+
+sub usage {
+  select STDERR;
+  print "SYNOPSIS\n  Convert a VCF (haploid) into TSV with column breakdown\n";
+  print "USAGE\n";
+  print "  $EXE [options] --auto > snps.txt  # from a snippy folder\n";
+  print "  $EXE [options] --vcf snps.vcf --bam aln.bam --ref ref.fa > snps.txt\n";
+  print "  $EXE [options] --vcf snps.vcf --bam aln.bam --ref ref.fa --html > snps.html\n";
+  print "OPTIONS\n";
+  foreach (@Options) {
+    printf "  --%-13s %s%s.\n",$_->{OPT},$_->{DESC},
+           defined($_->{DEFAULT}) ? " (default '$_->{DEFAULT}')" : "";
+  }
+  exit(1);
+}
+ 
+#----------------------------------------------------------------------

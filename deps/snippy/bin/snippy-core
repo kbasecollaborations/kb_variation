@@ -1,0 +1,471 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use FindBin;
+use lib "$FindBin::RealBin/../perl5";
+###LINE_FOR_BREW_CONDA###
+use Snippy::Version;
+use Bio::SeqIO;
+use List::Util qw(sum max);
+use File::Temp;
+use Fatal;
+use File::Basename;
+use Data::Dumper;
+use IO::File;
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Globals
+
+my $VERSION = Snippy::Version->version;
+my $EXE = $FindBin::RealScript;
+my $URL = "http://github.com/tseemann/snippy";
+my @CMDLINE = (basename($EXE), @ARGV);
+my $APPDIR = dirname($FindBin::RealBin);
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Small util functions
+
+# MacOS List::Util is so old it doens't have 'uniq' !
+sub uniq {
+  my %seen;
+  return grep { !$seen{$_}++ } @_;
+}
+
+# https://github.com/tseemann/snippy/issues/241
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Options
+
+my(@Options, $debug, $check, $noref, $aformat, $maxhap,
+             $in_prefix, $out_prefix, $fasta, $bed,
+             $gap_char, $mask_char);
+setOptions();
+
+msg("This is $EXE $VERSION");
+msg("Obtained from $URL");
+
+# needed to pass --check for new 'any2fasta' and 'samtools'
+msg("Enabling bundled tools for $^O");
+$ENV{PATH} = $ENV{PATH}.":$APPDIR/binaries/noarch:$APPDIR/binaries/$^O";
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# check for needed exes
+
+for my $exe (qw(any2fasta samtools minimap2 bedtools snp-sites)) {
+  my($which) = qx(which $exe 2> /dev/null);
+  $which or err("Can not find required '$exe' in PATH");
+  chomp $which;
+  msg("Found $exe - $which");
+}
+# quit now if --check was provided
+if ($check) {
+  msg("Dependences look good!");
+  exit(0);
+}
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# check command line parameters
+
+$fasta or err("Please provide --ref FASTA/GENBANK");
+-r $fasta or err("Can't open --ref $fasta");
+
+err("Can't read --bed $bed") if $bed and $bed ne 'auto' and !-f $bed;
+
+length($gap_char)==1 or err("--gap-char must be a single character");
+#length($pad_char)==1 or err("--pad-char must be a single character");
+length($mask_char)==1 or err("--mask-char must be a single character");
+
+$in_prefix or err("Please provide --in-prefix");
+$out_prefix or err("Please provide --out-prefix");
+
+$noref and wrn("$EXE $VERSION does not support the --noref option; ignoring.");
+$aformat and wrn("$EXE $VERSION does not support the --aformat option; using 'fasta'");
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Main
+
+my $infasta = $fasta;
+$fasta = "$out_prefix.ref.fa";
+msg("Saving reference FASTA: $fasta");
+system("any2fasta -n -u '$infasta' > '$fasta'")==0
+  or err("Could not convert $infasta to FASTA format");
+
+my($chrom,$chrom_list) = load_fasta_hash($fasta, 1);  # 1=uppercase
+my $total_bp = sum( map { length $chrom->{$_} } @$chrom_list );
+msg("Loaded", scalar(@$chrom_list), "sequences totalling $total_bp bp.");
+
+my %var;
+my %seq = ('Reference' => $chrom);
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Preload BED masking file
+
+my %mask;
+my @mask;
+my $masked_bp = 0;
+if ($bed) {
+  # create a self bed
+  if ($bed eq 'auto') {
+    msg("Auto --mask mode initiated: self-aligning --ref $fasta to identify repeats");
+    msg("Indexing '$fasta'");
+    system("samtools faidx '$fasta'")==0 or err("Could not run 'samtools faidx $fasta'");
+    # https://github.com/lh3/minimap2/blob/master/cookbook.md#hom-map
+    # https://github.com/lh3/miniasm/blob/master/PAF.md  # dv:f:0.0008
+    $bed = "$out_prefix.self_mask.bed"; # filename to reload nex
+    msg("Self-aligning --ref to identify repeats to $bed");
+    system("minimap2 -D -P -w19 -m200 '$fasta' '$fasta'"
+           ." | cut -f 1,3,4"
+           ." | sort -k1,1 -k2,2n"
+           ." | bedtools slop -i stdin -g '$fasta.fai' -r 1 -l 0"   # PAF to BED
+           ." | bedtools merge -i stdin"
+           ." > $bed 2> /dev/null")
+           ==0 or err("Could not run minimap2/bedtools");
+  }
+  # load the bed - either the one we just created, or one provided via --mask
+  msg("Loading mask bed file: $bed");
+  # CHROM \t BEGIN(inclusive) \t END(exclusive)  # 0-based
+  open my $BED, '<', $bed;
+  while (<$BED>) {
+    chomp;
+    next if m/^\s*$/; # skip blank lines
+    my @bed = split m/\t/;
+    err("BED [@bed] needs at least 3 columns: CHR BEGIN END") if @bed < 3;
+    err("BED [@bed] has CHR that is not in the reference") if not exists $chrom->{$bed[0]};
+    err("BED [@bed] has BEGIN > END which is invalid") if $bed[1] > $bed[2];
+    $bed[1]++;  # put into regular coordinates
+    push @mask, [ @bed ];
+    for my $pos ($bed[1] .. $bed[2]) {
+      $mask{$bed[0]}{$pos}++;
+      $masked_bp++;
+    }
+  }
+  close $BED;
+}
+my $masked_regions = scalar(@mask);
+msg("Will mask $masked_regions regions totalling $masked_bp bp ~ ".sprintf("%.2f%%", $masked_bp*100/$total_bp) );
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Load and decompose variants from each VCF
+
+sub guess_prefix {
+  my($dir) = @_;
+  my $ext = "aligned.fa";
+  for my $try ("$dir/$in_prefix.$ext", <$dir/*.$ext>) {
+    #msg("Checking if file exists: $try");
+    if (-r $try) {
+      $try =~ m"^$dir/(.*?).$ext";
+      return $1;
+    }
+  }
+  return;
+}
+
+my @id;
+my $id_counter=0;
+
+for my $dir (@ARGV) {
+  -d $dir or err("Sample folder '$dir' does not exist");
+  my $ipx = guess_prefix($dir) or err("Could not find .aligned.fa/.vcf in $dir");
+  my $vcf = "$dir/$ipx.vcf";
+  -r $vcf or err("Could not read VCF '$vcf'");
+  my $afa = "$dir/$ipx.aligned.fa";
+  -r $afa or err("Could not read AFA '$afa'");
+  my $id = basename($dir); # strip any path info #217
+  push @id, $id;
+  
+  msg("$id: loading snippy alignment from $afa") if $debug;
+  ($seq{$id}) = load_fasta_hash($afa, 0);  # load snippy alignment (no uppercase)
+
+  # Check ref matches afa - https://github.com/tseemann/snippy/issues/247
+  for my $label (keys %{ $seq{$id} }) {
+    exists($chrom->{$label}) or err("$afa has entry '$label' but $infasta doesn't.");
+  }
+
+  my $unal = sum( map { $seq{$id}{$_} =~ tr/-/-/ } @$chrom_list );
+  my $nhet = sum( map { $seq{$id}{$_} =~ tr/n/n/ } @$chrom_list );
+  my($ndel,$nins,$nsnp) = (0,0,0);
+  
+  msg("$id: reading variants from $vcf") if $debug;
+  open VCF, '<', $vcf;
+  my $nvar = 0;
+  while (<VCF>) {
+    next if m/^#/;
+    chomp;
+    #CHROM POS ID REF ALT QUAL FILTER INFO FORMAT SAMPLE1 ...
+    my($chr,$pos,undef,$ref,$alt,$qual,$filter,$info,$format,$sample) = split m/\t/;
+    my @ref = split m//, $ref;
+    my @alt = split m//, $alt;
+
+    # https://github.com/tseemann/snippy/issues/234
+    # FIXME: should we be masking this in $seq{$id}{contig}<pos> ?
+    if (@ref > $maxhap and @alt > $maxhap) {
+      msg("Skipping: $id $chr $pos $ref $alt | both haplotypes > $maxhap bp") if $debug;
+      next;
+    }
+
+    my $L = max($#ref, $#alt);
+
+    for my $i (0 .. $L) {  # this is L not L-1 because we used $#array
+      my $r = shift(@ref) || $gap_char;
+      my $a = shift(@alt) || $gap_char;
+      if ($r ne $a) {
+        if ($r ne $gap_char) {
+          $var{$chr}{$pos+$i}{$id} = $a;  # ALT is [ATGC-]
+          $a eq '-' ? $ndel++ : $nsnp++;
+        }
+        else {
+          $nins++;
+        }
+      }
+    }
+  }
+  my $gaps = sum( map { $seq{$id}{$_} =~ tr/-/-/ } @$chrom_list );
+  msg("$id_counter\t$id\tsnp=$nsnp\tdel=$ndel\tins=$nins\thet=$nhet\tunaligned=$gaps");
+  $id_counter++;
+}
+
+#print STDERR Dumper(\%var);
+
+@id = sort @id;
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Write VCF, TAB and generate FULL.ALN
+
+my $tab_hdr = tsv(qw(CHR POS REF), @id);
+my $TAB = create_file("$out_prefix.tab");
+print $TAB $tab_hdr;
+#my $FULLTAB = create_file("$out_prefix.full.tab");
+#print $TAB $tab_hdr;
+
+my $VCF = create_file("$out_prefix.vcf");
+print $VCF <<"EOB";
+##fileformat=VCFv4.2
+##commandLine="@CMDLINE"
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##INFO=<ID=TYPE,Number=A,Type=String,Description="Allele type: snp ins del">
+EOB
+for my $chr (@$chrom_list) {
+  printf $VCF "##contig=<ID=$chr,len=%d>\n", length($chrom->{$chr});
+}
+print $VCF tsv('#CHROM', qw(POS ID REF ALT QUAL FILTER INFO FORMAT), @id);
+
+for my $chr (@$chrom_list) {
+  msg("Processing contig: $chr");
+  POS:
+  for my $pos ( sort { $a <=> $b } keys %{$var{$chr}} ) 
+  {
+    next if $mask{$chr}{$pos}; # BAIL OUT IF THIS SITE IS MASKED
+
+    # check how many variants at this site and bail out if none
+    my @varid = keys %{$var{$chr}{$pos}};
+    next unless @varid;
+  
+    my $r = substr($chrom->{$chr}, $pos-1, 1);
+    my @vcf = ( $chr, $pos, '.', $r );
+    my @tab = ( $chr, $pos, $r );
+    my %ALT;
+
+    # check ALL samples not just 'var' ones, as might be absent, so not core
+    for my $id (@id) {
+      # check if this site has sample support ie. not -,N,n etc
+      my $ac = substr( $seq{$id}{$chr}, $pos-1, 1 );
+      $ac or err("Could not extract base $chr:".($pos-1)." for isolate $id");
+      next POS unless $ac =~ m/[AGTC]/i;
+      # get ALT
+      my $alt = $var{$chr}{$pos}{$id};
+      next unless $alt; # no variant here
+      #err("Bad ALT=$alt") unless $alt =~ m/[AGTC-]/;
+      #err("Long ALT=$alt") if length($alt) > 1;
+      # patch in ALT
+      substr($seq{$id}{$chr}, $pos-1, 1) = lc($alt); # could be '-'
+      # if insertion, we don't put in core
+      next POS unless $alt =~ m/[AGTC]/i;
+      $ALT{$id} = $alt;
+    }
+    my @GT = sort { $a cmp $b } uniq values %ALT;
+    my %GT_of = map { ($GT[$_-1] => $_) } (1 .. @GT);
+    $GT_of{$r} = 0;
+#    print Dumper($r, \%ALT, \@GT, \%GT_of);
+
+    push @vcf, join(",", @GT), '.', 'PASS', 'TYPE=snp', 'GT';
+    push @vcf, map { $GT_of{$ALT{$_} || $r} || '0' } @id;
+    print $VCF tsv(@vcf);
+
+    push @tab, map { $ALT{$_} || $r } @id;
+    print $TAB tsv(@tab);
+  }
+} 
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Mask FULL.ALN
+push @id, 'Reference';
+if (@mask) {
+  msg("Masking alignment at", 0+@mask, "regions");
+  for my $region (@mask) {
+    my($chr, $begin, $end) = @$region;
+    my $len = $end-$begin+1;
+    my $patch = ${mask_char}x$len;
+    substr( $seq{$_}{$chr}, $begin-1, $len, $patch ) for (@id);
+  }
+}
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# PREFIX.full.aln
+# We have to form a single alignment so concatenate sequences
+my $full_aln = "$out_prefix.full.aln";
+msg("Generating $full_aln");
+my %out;
+for my $id ('Reference', @id) {
+  $out{$id} = join '', map { $seq{$id}{$_} } @$chrom_list;
+}
+save_fasta_hash($full_aln, \%out);
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# PREFIX.txt file
+my @stats = ([ qw(ID LENGTH ALIGNED UNALIGNED VARIANT HET MASKED LOWCOV) ]);
+for my $id (@id) {
+ push @stats, [
+   $id,
+   length($out{$id}),
+   $out{$id} =~ tr/[AGCTagct]/[AGCTagct]/,
+   $out{$id} =~ tr/-/-/,
+   $out{$id} =~ tr/[agct]/[agct]/,
+   $out{$id} =~ tr/n/n/,
+   $out{$id} =~ tr/X/X/,
+   $out{$id} =~ tr/N/N/,
+ ];
+}
+matrix_to_tsv("$out_prefix.txt", \@stats);
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Create the core snps AFTER the .txt file in case this fails (D.Ingle)
+my $core_aln = "$out_prefix.aln";
+my $cmd = "snp-sites -c -o $core_aln $full_aln";
+msg("Running: $cmd");
+system($cmd)==0 or err("Could not run: $cmd");
+
+# . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+# Goodbye
+my @motd = (
+  "This analysis is totally hard-core!",
+  "Run 'snp-sites -b -c -o $out_prefix.phylo.aln $out_prefix.full.aln' for IQTree, BEAST, RaxML",
+  "You can mask columns using '--mask BEDFILE --mask-char X'",
+  "The Snippy manual is at $URL/blob/master/README.md",
+  "Found a bug? Post it at $URL/issues",
+  "Have a suggestion? Tell me at $URL/issues",
+);
+srand($$);
+msg( $motd[ int(rand(scalar(@motd))) ] );
+msg("Done.");
+
+#----------------------------------------------------------------------
+sub matrix_to_tsv {
+  my($fname, $matrix) = @_;
+  msg("Creating TSV file: $fname");
+  open my $TSV, '>', $fname;
+  for my $row (@$matrix) {
+    print $TSV tsv(@$row);
+  }
+  close $TSV;
+}
+
+#----------------------------------------------------------------------
+sub create_file {
+  my($fname) = @_;
+  msg("Opening: $fname");
+  return IO::File->new(">$fname"); # or err("Can't open: $fname");
+}
+
+#----------------------------------------------------------------------
+sub tsv {
+  return join("\t", @_)."\n";
+}
+
+#----------------------------------------------------------------------
+sub show_version {
+  print "$EXE $VERSION\n";
+  exit(0);
+}
+
+#----------------------------------------------------------------------
+sub load_fasta_hash {
+  my($fname, $uppercase) = @_;
+  msg("Loading FASTA: $fname") if $debug;
+  my $hash;
+  my $ids;
+  my $in = Bio::SeqIO->new(-file=>$fname, -format=>"fasta", -alphabet=>'dna');
+  while (my $seq = $in->next_seq) {
+    $hash->{ $seq->id } = $uppercase ? uc($seq->seq) : $seq->seq;
+    push @$ids, $seq->id;
+  }
+  return ($hash, $ids);
+}
+
+#----------------------------------------------------------------------
+sub save_fasta_hash {
+  my($fname, $hash, $order) = @_;
+  msg("Saving FASTA: $fname") if $debug;
+  my $out = Bio::SeqIO->new(-file=>">$fname", -format=>"fasta", -alphabet=>'dna');
+  $order = [ sort keys %$hash ] unless $order;
+  for my $id (@$order) {
+    $out->write_seq(
+      Bio::Seq->new(-id=>$id, -seq=>$hash->{$id}, -alphabet=>'dna')
+    );
+  }
+  return $hash;
+}
+
+#----------------------------------------------------------------------
+sub msg { print STDERR "@_\n";}
+sub wrn { msg("NOTICE:", @_); }
+sub err { msg("ERROR:", @_); exit(2); }
+
+#----------------------------------------------------------------------
+# Option setting routines
+
+sub setOptions {
+  use Getopt::Long;
+
+  @Options = (
+    {OPT=>"help!",       VAR=>\&usage,                        DESC=>"This help"},
+    {OPT=>"version!",    VAR=>\&show_version,                 DESC=>"Print version and exit"},
+    {OPT=>"debug!",      VAR=>\$debug,      DEFAULT=>0,       DESC=>"Output verbose debug info"},
+    {OPT=>"check!",      VAR=>\$check,      DEFAULT=>0,       DESC=>"Check dependencies and exit"},
+    {OPT=>"ref=s",       VAR=>\$fasta,      DEFAULT=>'',      DESC=>"Reference in FASTA or GENBANK"},
+    {OPT=>"prefix=s",    VAR=>\$out_prefix, DEFAULT=>'core',  DESC=>"Output prefix"},
+    {OPT=>"maxhap=i",    VAR=>\$maxhap,     DEFAULT=>100,     DESC=>"Largest haplotype to decompose"},
+    {OPT=>"mask=s",      VAR=>\$bed,        DEFAULT=>'',      DESC=>"BED file of sites to mask"},
+    {OPT=>"gap-char=s",  VAR=>\$gap_char,   DEFAULT=>'-',     DESC=>"Gap/deletion character"},
+    {OPT=>"mask-char=s", VAR=>\$mask_char,  DEFAULT=>'X',     DESC=>"Masking character"},
+    {OPT=>"inprefix=s",  VAR=>\$in_prefix,  DEFAULT=>'snps',  DESC=>"Expected prefix of Snippy output files"},
+    {OPT=>"noref!",      VAR=>\$noref,      DEFAULT=>0,       DESC=>"Legacy option kept for backward compat."},
+    {OPT=>"aformat=s",   VAR=>\$aformat,    DEFAULT=>'',      DESC=>"Legacy option kept for backward compat."},
+  );
+
+  (!@ARGV) && (usage());
+
+  &GetOptions(map {$_->{OPT}, $_->{VAR}} @Options) || usage();
+
+  # Now setup default values.
+  foreach (@Options) {
+    if (defined($_->{DEFAULT}) && !defined(${$_->{VAR}})) {
+      ${$_->{VAR}} = $_->{DEFAULT};
+    }
+  }
+}
+
+sub usage {
+  select STDERR;
+  print "SYNOPSIS\n  Build whole+core genome aligment from Snippy folders\n";
+  print "USAGE\n";
+  print "  $EXE [options] --ref ref.fa snippy1 snippy2 snippy3 ...\n";
+  print "OPTIONS\n";
+  foreach (@Options) {
+    next if $_->{DESC} =~ m/^Legacy/;
+    printf "  --%-13s %s%s.\n",$_->{OPT},$_->{DESC},
+           defined($_->{DEFAULT}) ? " (default '$_->{DEFAULT}')" : "";
+  }
+  exit(1);
+}
+ 
+#----------------------------------------------------------------------

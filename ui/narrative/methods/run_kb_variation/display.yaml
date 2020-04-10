@@ -1,0 +1,86 @@
+#
+# define display information
+#
+name: Variation analysis with Snippy for haploid genomes
+
+tooltip: |
+    Analyze variants relative to a reference sequence with snippy Tool.
+
+screenshots: []
+
+icon: icon.png
+
+#
+# define a set of similar apps that might be useful to the user
+#
+suggestions:
+    apps:
+        related:
+            []
+        next:
+            []
+
+#
+# Configure the display and description of parameters
+#
+parameters :
+    genome_or_assembly_ref :
+        ui-name : |
+            Reference assembly
+        short-hint : |
+            The reference assembly for which variants will be called.
+
+
+    fastq_ref :
+        ui-name : |
+            Reads
+        short-hint : |
+            These reads will be mapped and then used to call variants.
+
+    map_qual :
+        ui-name : |
+            Minimum read mapping quality to consider
+        short-hint : |
+            Minimum read mapping quality to consider
+
+    base_qual :
+        ui-name : |
+            Minimum base quality to consider 
+        short-hint : |
+            Minimum base quality to consider 
+
+    min_cov :
+        ui-name : |
+            Minimum site depth to for calling alleles
+        short-hint : |
+            Minimum site depth to for calling alleles
+
+    min_qual :
+        ui-name : |
+            Minumum QUALITY in VCF column 6
+        short-hint : |
+            Minumum QUALITY in VCF column 6
+
+    variation_object_name :
+        ui-name: |
+            Output name for reference to reads
+        short-hint : |
+            Name for the variation object returned from the application.
+
+    sample_attribute_ref :
+        ui-name : |
+            Sample attribute reference
+        short-hint : |
+            sample meta-data object.
+
+
+description : |
+    <p>This method uses snippy to call variants in a reference assembly.  It will first map short reads to this assembly.
+
+    <p><strong>Team members who deployed this App in KBase</strong>: Manish Kumar. For questions, please <a href="http://kbase.us/contact-us/">contact us</a>.</p>
+
+publications :
+    -
+        display-text: |
+             U
+        link: link
