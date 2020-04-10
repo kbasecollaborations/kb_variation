@@ -27,6 +27,8 @@ class igvutils:
     
     def prepare_data_igv (self, genome_fa_path, vcf_path):
 
+
+
         #TODO: Fix all hard codes
         vcf_name = os.path.basename(vcf_path)
         vcf_gz_name = vcf_name + ".gz"

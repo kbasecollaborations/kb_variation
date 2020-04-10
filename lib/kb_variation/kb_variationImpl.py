@@ -116,13 +116,13 @@ class kb_variation:
 
         #TODO: Remove hard coded stuff from here
         template_dir = "/kb/module/lib/kb_variation/Utils/report_template"
-        data_dir = "/kb/module/lib/kb_variation/Utils/report/data"
+        #data_dir = "/kb/module/lib/kb_variation/Utils/report/data"
 
         report_dir = "/kb/module/work/tmp/report_dir"
         report_data_dir = report_dir + "/data"
 
         destination_report = shutil.copytree(template_dir, report_dir)
-        destination_report_data = shutil.copytree(data_dir, report_data_dir)
+        #destination_report_data = shutil.copytree(data_dir, report_data_dir)
 
         
 
