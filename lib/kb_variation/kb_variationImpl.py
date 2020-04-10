@@ -112,14 +112,15 @@ class kb_variation:
 
         vu.save_variation_from_vcf(VariationUtilParams)
 
-        
 
         #TODO: Remove hard coded stuff from here
         template_dir = "/kb/module/lib/kb_variation/Utils/report_template"
         #data_dir = "/kb/module/lib/kb_variation/Utils/report/data"
 
-        report_dir = "/kb/module/work/tmp/report_dir"
-        report_data_dir = report_dir + "/data"
+
+        report_dir = self.scratch + "/report_dir"
+
+
 
         destination_report = shutil.copytree(template_dir, report_dir)
         #destination_report_data = shutil.copytree(data_dir, report_data_dir)
@@ -127,7 +128,7 @@ class kb_variation:
         
 
         assembly_file_path = assembly['path']
-        ig = igvutils ()
+        ig = igvutils (report_dir)
         filenames = ig.prepare_data_igv(assembly_file_path, snippy_vcf_file_path)
 
 
@@ -139,7 +140,7 @@ class kb_variation:
         name_dict['SNP_INDEX_FILE'] = "data/" + filenames['vcf_gz_index']
         name_dict['SNP_NAME'] = reads_name   #TODO: Fix this for population
 
-        hu = htmlreportutils(self.callback_url, params['workspace_name'])
+        hu = htmlreportutils(self.callback_url, params['workspace_name'], report_dir)
 
         hu.create_html_report(report_dir, name_dict)
 

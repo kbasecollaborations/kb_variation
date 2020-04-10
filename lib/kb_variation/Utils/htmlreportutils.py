@@ -6,15 +6,16 @@ from installed_clients.WorkspaceClient import Workspace
 import shutil 
 
 class htmlreportutils:
-    def __init__(self, callback_url, workspace_name):
+    def __init__(self, callback_url, workspace_name, report_dir):
         self.callback_url = callback_url
         self.workspace_name = workspace_name
+        self.index_html = report_dir + "/index.html"
         pass
 
 
     def generate_html_from_template(self, name_dict):
 
-        with open("/kb/module/work/tmp/report_dir/index.html", 'w') as result_file:
+        with open(self.index_html, 'w') as result_file:
 
             with open(os.path.join('/kb/module/lib/kb_variation/Utils', 'report_template',
                                    'report_template.html'),

@@ -8,8 +8,9 @@ from pprint import pprint,pformat
 
 class igvutils:
 
-    def __init__(self):
-       self.output_dir = "/kb/module/work/tmp/report_dir/data/"
+    def __init__(self, report_dir):
+
+       self.output_dir = report_dir + "/"
        pass 
 
     
