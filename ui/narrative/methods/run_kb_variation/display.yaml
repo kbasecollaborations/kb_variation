@@ -1,7 +1,7 @@
 #
 # define display information
 #
-name: Variation analysis with Snippy for haploid genomes
+name:  Analyze variation with Snippy for haploid genomes
 
 tooltip: |
     Analyze variants relative to a reference sequence with snippy Tool.
